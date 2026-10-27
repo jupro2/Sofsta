@@ -1,7 +1,7 @@
 {
-  "name": "autostart-manager",
-  "version": "1.0.0",
-  "description": "Windows 开机自启动程序管理器",
+  "name": "sofsta",
+  "version": "1.1.0",
+  "description": "Sofsta — Windows 桌面应用启动与模式切换工具",
   "type": "module",
   "scripts": {
     "dev": "vite",

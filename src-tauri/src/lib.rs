@@ -1,7 +1,10 @@
 mod autostart;
 mod commands;
 mod config;
+mod installed_apps;
 mod launcher;
+mod processes;
+mod runtime;
 
 use std::env;
 
@@ -32,11 +35,14 @@ pub fn run() {
             commands::set_mode_auto_start,
             // 程序管理
             commands::add_app_to_mode,
+            commands::get_installed_apps,
             commands::remove_app,
             commands::toggle_app,
             commands::update_delay,
             // 启动
             commands::launch_mode,
+            commands::switch_mode,
+            commands::get_runtime_status,
             commands::launch_app_now,
             commands::pick_executable,
         ])

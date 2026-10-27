@@ -8,6 +8,8 @@ pub struct AppEntry {
     pub name: String,
     pub path: String,
     pub args: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
     pub enabled: bool,
     pub delay_seconds: u32,
 }
@@ -68,8 +70,9 @@ impl Default for AppConfig {
     }
 }
 
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    // Keep the existing data location so renaming Sofsta does not discard user modes or runtime records.
     base.join("AutoStartManager")
 }
 
@@ -155,5 +158,43 @@ impl AppConfig {
     /// 查找模式（可变）
     pub fn find_mode_mut(&mut self, mode_id: &str) -> Option<&mut Mode> {
         self.modes.iter_mut().find(|m| m.id == mode_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_entries_without_working_directory_still_load() {
+        let entry: AppEntry = serde_json::from_str(
+            r#"{"id":"old","name":"Example","path":"C:\\Example.exe","args":"","enabled":true,"delay_seconds":5}"#,
+        )
+        .unwrap();
+        assert!(entry.working_dir.is_none());
+        assert_eq!(entry.delay_seconds, 5);
+    }
+
+    #[test]
+    fn discovered_launch_metadata_survives_config_round_trip() {
+        let mut config = AppConfig::default();
+        config.modes[0].apps.push(AppEntry {
+            id: "discovered".into(),
+            name: "中文软件".into(),
+            path: r"C:\Program Files\Example\app.exe".into(),
+            args: r#"--profile "工作 配置""#.into(),
+            working_dir: Some(r"C:\Program Files\Example".into()),
+            enabled: true,
+            delay_seconds: 5,
+        });
+        let saved = serde_json::to_string(&config).unwrap();
+        let loaded: AppConfig = serde_json::from_str(&saved).unwrap();
+        let app = &loaded.modes[0].apps[0];
+        assert_eq!(app.name, "中文软件");
+        assert_eq!(app.args, r#"--profile "工作 配置""#);
+        assert_eq!(
+            app.working_dir.as_deref(),
+            Some(r"C:\Program Files\Example")
+        );
     }
 }

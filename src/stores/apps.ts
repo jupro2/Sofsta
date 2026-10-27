@@ -7,6 +7,7 @@ export interface AppEntry {
   name: string;
   path: string;
   args: string;
+  working_dir?: string | null;
   enabled: boolean;
   delay_seconds: number;
 }
@@ -20,11 +21,39 @@ export interface Mode {
   apps: AppEntry[];
 }
 
+export interface InstalledApp {
+  name: string;
+  path: string;
+  args: string;
+  working_dir: string | null;
+}
+
+export interface DiscoveryResult {
+  apps: InstalledApp[];
+  warnings: string[];
+}
+
 export interface AppConfig {
   modes: Mode[];
   exit_delay_minutes: number;
   auto_start_enabled: boolean;
   silent_launch: boolean;
+}
+
+export interface RuntimeStatus {
+  modes: { id: string; name: string }[];
+  managed_app_count: number;
+  process_count: number;
+}
+
+export interface OperationReport {
+  status: RuntimeStatus;
+  started: number;
+  closed: number;
+  already_running: string[];
+  failures: { name: string; message: string }[];
+  unclosed: string[];
+  warnings: string[];
 }
 
 export const useAppsStore = defineStore("apps", () => {
@@ -33,6 +62,48 @@ export const useAppsStore = defineStore("apps", () => {
   const exitDelayMinutes = ref(5);
   const autoStartEnabled = ref(true);
   const silentLaunch = ref(true);
+  const runtimeStatus = ref<RuntimeStatus | null>(null);
+  const runtimeError = ref("");
+  const operationBusy = ref(false);
+  const operationKind = ref<"launch" | "switch" | "test">("launch");
+  const operationTargetName = ref("");
+  const operationReport = ref<OperationReport | null>(null);
+  const operationError = ref("");
+  const blockedSwitchModeId = ref("");
+  let runtimeLoading = false;
+  let runtimeRevision = 0;
+
+  const runningModeLabel = computed(() => runtimeStatus.value?.modes
+    .map((running) => modes.value.find((mode) => mode.id === running.id)?.name ?? running.name)
+    .join("、") || "尚未通过本工具启动模式");
+
+  const needsModeSwitch = computed(() => !!activeModeId.value &&
+    !!runtimeStatus.value?.modes.some((mode) => mode.id !== activeModeId.value));
+
+  const selectedModeIsCurrent = computed(() => runtimeStatus.value?.modes.length === 1 &&
+    runtimeStatus.value.modes[0]?.id === activeModeId.value);
+
+  function errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  async function loadRuntimeStatus() {
+    if (runtimeLoading || operationBusy.value) return;
+    const revision = runtimeRevision;
+    runtimeLoading = true;
+    try {
+      const status = await invoke<RuntimeStatus>("get_runtime_status");
+      if (!status || !Array.isArray(status.modes)) throw new Error("无法读取模式运行状态");
+      if (revision === runtimeRevision && !operationBusy.value) {
+        runtimeStatus.value = status;
+        runtimeError.value = "";
+      }
+    } catch (error) {
+      if (revision === runtimeRevision && !operationBusy.value) runtimeError.value = errorMessage(error);
+    } finally {
+      runtimeLoading = false;
+    }
+  }
 
   // 当前选中的模式
   const activeMode = computed(() =>
@@ -135,14 +206,21 @@ export const useAppsStore = defineStore("apps", () => {
 
   // ─────────────────── 程序管理 ───────────────────
 
-  async function addApp(appPath: string) {
-    if (!activeModeId.value) return;
+  async function addApp(
+    appPath: string,
+    details?: InstalledApp,
+    modeId = activeModeId.value
+  ) {
+    if (!modeId) throw new Error("请先选择一个模式");
     try {
       const app = (await invoke("add_app_to_mode", {
-        modeId: activeModeId.value,
+        modeId,
         path: appPath,
+        name: details?.name ?? null,
+        args: details?.args ?? null,
+        workingDir: details?.working_dir ?? null,
       })) as AppEntry;
-      const mode = modes.value.find((m) => m.id === activeModeId.value);
+      const mode = modes.value.find((m) => m.id === modeId);
       if (mode) mode.apps.push(app);
     } catch (e) {
       console.error("Failed to add app:", e);
@@ -195,20 +273,43 @@ export const useAppsStore = defineStore("apps", () => {
 
   // ─────────────────── 启动 ───────────────────
 
-  async function launchMode(modeId: string) {
+  async function runOperation(modeId: string, kind: "launch" | "switch" | "test", force = false, appId?: string) {
+    if (operationBusy.value) return;
+    operationBusy.value = true;
+    runtimeRevision += 1;
+    operationKind.value = kind;
+    operationTargetName.value = modes.value.find((mode) => mode.id === modeId)?.name ?? "所选模式";
+    operationError.value = "";
+    operationReport.value = null;
+    blockedSwitchModeId.value = "";
     try {
-      await invoke("launch_mode", { modeId });
-    } catch (e) {
-      console.error("Failed to launch mode:", e);
+      const command = kind === "switch" ? "switch_mode" : kind === "test" ? "launch_app_now" : "launch_mode";
+      const args = kind === "switch" ? { modeId, force } : kind === "test" ? { modeId, appId } : { modeId };
+      const report = await invoke<OperationReport>(command, args);
+      operationReport.value = report;
+      runtimeStatus.value = report.status;
+      runtimeError.value = "";
+      if (kind === "switch" && report.unclosed.length) blockedSwitchModeId.value = modeId;
+    } catch (error) {
+      operationError.value = errorMessage(error);
+    } finally {
+      operationBusy.value = false;
+      runtimeRevision += 1;
+      // Refresh after failures too: some old apps may already have exited before an error.
+      void loadRuntimeStatus();
     }
   }
 
-  async function launchAppNow(path: string) {
-    try {
-      await invoke("launch_app_now", { path });
-    } catch (e) {
-      console.error("Failed to launch app:", e);
-    }
+  async function launchMode(modeId: string) {
+    await runOperation(modeId, "launch");
+  }
+
+  async function switchMode(modeId: string, force = false) {
+    await runOperation(modeId, "switch", force);
+  }
+
+  async function launchAppNow(app: AppEntry) {
+    await runOperation(activeModeId.value, "test", false, app.id);
   }
 
   async function pickExecutable(): Promise<string | null> {
@@ -216,7 +317,7 @@ export const useAppsStore = defineStore("apps", () => {
       return (await invoke("pick_executable")) as string | null;
     } catch (e) {
       console.error("Failed to pick executable:", e);
-      return null;
+      throw e;
     }
   }
 
@@ -256,6 +357,17 @@ export const useAppsStore = defineStore("apps", () => {
     exitDelayMinutes,
     autoStartEnabled,
     silentLaunch,
+    runtimeStatus,
+    runtimeError,
+    operationBusy,
+    operationKind,
+    operationTargetName,
+    operationReport,
+    operationError,
+    blockedSwitchModeId,
+    runningModeLabel,
+    needsModeSwitch,
+    selectedModeIsCurrent,
     // computed
     activeMode,
     currentApps,
@@ -278,6 +390,8 @@ export const useAppsStore = defineStore("apps", () => {
     updateDelay,
     // launch
     launchMode,
+    switchMode,
+    loadRuntimeStatus,
     launchAppNow,
     pickExecutable,
   };

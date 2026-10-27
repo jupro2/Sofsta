@@ -1,6 +1,6 @@
 use crate::autostart;
 use crate::config::{AppConfig, AppEntry, Mode};
-use std::process::Command;
+use crate::{installed_apps, runtime};
 use tauri::command;
 
 // ───────────────────────── 配置 ─────────────────────────
@@ -73,9 +73,7 @@ pub fn update_mode(
     color: String,
 ) -> Result<(), String> {
     let mut config = AppConfig::load();
-    let mode = config
-        .find_mode_mut(&id)
-        .ok_or("未找到该模式")?;
+    let mode = config.find_mode_mut(&id).ok_or("未找到该模式")?;
     mode.name = name;
     mode.icon_emoji = icon_emoji;
     mode.color = color;
@@ -99,9 +97,7 @@ pub fn remove_mode(id: String) -> Result<(), String> {
 #[command]
 pub fn set_mode_auto_start(mode_id: String, enabled: bool) -> Result<(), String> {
     let mut config = AppConfig::load();
-    let mode = config
-        .find_mode_mut(&mode_id)
-        .ok_or("未找到该模式")?;
+    let mode = config.find_mode_mut(&mode_id).ok_or("未找到该模式")?;
     mode.auto_start = enabled;
     config.save()
 }
@@ -110,42 +106,58 @@ pub fn set_mode_auto_start(mode_id: String, enabled: bool) -> Result<(), String>
 
 /// 向指定模式添加程序
 #[command]
-pub fn add_app_to_mode(mode_id: String, path: String) -> Result<AppEntry, String> {
+pub fn add_app_to_mode(
+    mode_id: String,
+    path: String,
+    name: Option<String>,
+    args: Option<String>,
+    working_dir: Option<String>,
+) -> Result<AppEntry, String> {
     let mut config = AppConfig::load();
+    let args = args.unwrap_or_default();
 
     // 检查该模式中是否已存在
-    let mode = config
-        .find_mode(&mode_id)
-        .ok_or("未找到该模式")?;
-    if mode.apps.iter().any(|a| a.path == path) {
+    let mode = config.find_mode(&mode_id).ok_or("未找到该模式")?;
+    if mode
+        .apps
+        .iter()
+        .any(|a| a.path.to_lowercase() == path.to_lowercase() && a.args == args)
+    {
         return Err("该程序已在此模式中".to_string());
     }
 
     let app = AppEntry {
         id: uuid::Uuid::new_v4().to_string(),
-        name: AppConfig::extract_name(&path),
+        name: name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| AppConfig::extract_name(&path)),
         path,
-        args: String::new(),
+        args,
+        working_dir,
         enabled: true,
         delay_seconds: 5,
     };
 
-    let mode = config
-        .find_mode_mut(&mode_id)
-        .ok_or("未找到该模式")?;
+    let mode = config.find_mode_mut(&mode_id).ok_or("未找到该模式")?;
     mode.apps.push(app.clone());
     config.save()?;
 
     Ok(app)
 }
 
+/// 只读扫描在工作线程中执行，避免阻塞界面。
+#[command]
+pub async fn get_installed_apps() -> Result<installed_apps::DiscoveryResult, String> {
+    tauri::async_runtime::spawn_blocking(installed_apps::discover)
+        .await
+        .map_err(|e| format!("扫描软件失败: {}", e))?
+}
+
 /// 从指定模式删除程序
 #[command]
 pub fn remove_app(mode_id: String, app_id: String) -> Result<(), String> {
     let mut config = AppConfig::load();
-    let mode = config
-        .find_mode_mut(&mode_id)
-        .ok_or("未找到该模式")?;
+    let mode = config.find_mode_mut(&mode_id).ok_or("未找到该模式")?;
     mode.apps.retain(|a| a.id != app_id);
     config.save()
 }
@@ -154,9 +166,7 @@ pub fn remove_app(mode_id: String, app_id: String) -> Result<(), String> {
 #[command]
 pub fn toggle_app(mode_id: String, app_id: String, enabled: bool) -> Result<(), String> {
     let mut config = AppConfig::load();
-    let mode = config
-        .find_mode_mut(&mode_id)
-        .ok_or("未找到该模式")?;
+    let mode = config.find_mode_mut(&mode_id).ok_or("未找到该模式")?;
     let app = mode
         .apps
         .iter_mut()
@@ -170,9 +180,7 @@ pub fn toggle_app(mode_id: String, app_id: String, enabled: bool) -> Result<(), 
 #[command]
 pub fn update_delay(mode_id: String, app_id: String, seconds: u32) -> Result<(), String> {
     let mut config = AppConfig::load();
-    let mode = config
-        .find_mode_mut(&mode_id)
-        .ok_or("未找到该模式")?;
+    let mode = config.find_mode_mut(&mode_id).ok_or("未找到该模式")?;
     let app = mode
         .apps
         .iter_mut()
@@ -184,26 +192,48 @@ pub fn update_delay(mode_id: String, app_id: String, seconds: u32) -> Result<(),
 
 // ───────────────────────── 启动 ─────────────────────────
 
-/// 一键启动指定模式中的所有已启用程序
+async fn runtime_command<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|e| format!("运行操作失败: {}", e))?
+}
+
+/// 一键启动模式，重复执行只补充尚未启动的程序。
 #[command]
-pub fn launch_mode(mode_id: String) -> Result<(), String> {
-    let config = AppConfig::load();
-    let mode = config
-        .find_mode(&mode_id)
-        .ok_or("未找到该模式")?;
+pub async fn launch_mode(mode_id: String) -> Result<runtime::OperationReport, String> {
+    runtime_command(move || {
+        let config = AppConfig::load();
+        let mode = config.find_mode(&mode_id).ok_or("未找到该模式")?;
+        runtime::RuntimeStore::acquire()?.launch_mode(mode, false)
+    })
+    .await
+}
 
-    for app in mode.apps.iter().filter(|a| a.enabled) {
-        let mut cmd = Command::new(&app.path);
-        if !app.args.is_empty() {
-            cmd.args(app.args.split_whitespace().collect::<Vec<_>>());
-        }
-        match cmd.spawn() {
-            Ok(_) => println!("[AutoStartManager] 已启动: {}", app.name),
-            Err(e) => eprintln!("[AutoStartManager] 启动 {} 失败: {}", app.name, e),
-        }
-    }
+/// 先关闭已接管的旧程序，确认退出后才启动目标模式。
+#[command]
+pub async fn switch_mode(
+    mode_id: String,
+    force: Option<bool>,
+) -> Result<runtime::OperationReport, String> {
+    runtime_command(move || {
+        let config = AppConfig::load();
+        let mode = config.find_mode(&mode_id).ok_or("未找到该模式")?;
+        let mut store = runtime::RuntimeStore::acquire()?;
+        store.sync_current_modes(&config.modes)?;
+        store.switch_mode(mode, force.unwrap_or(false))
+    })
+    .await
+}
 
-    Ok(())
+#[command]
+pub async fn get_runtime_status() -> Result<runtime::RuntimeStatus, String> {
+    runtime_command(|| {
+        let config = AppConfig::load();
+        runtime::RuntimeStore::acquire()?.sync_current_modes(&config.modes)
+    })
+    .await
 }
 
 /// 选择可执行文件（打开文件对话框）
@@ -230,9 +260,23 @@ pub fn pick_executable(app: tauri::AppHandle) -> Result<Option<String>, String> 
 
 /// 立即测试启动一个程序
 #[command]
-pub fn launch_app_now(path: String) -> Result<(), String> {
-    Command::new(&path)
-        .spawn()
-        .map_err(|e| format!("启动程序失败: {}", e))?;
-    Ok(())
+pub async fn launch_app_now(
+    mode_id: String,
+    app_id: String,
+) -> Result<runtime::OperationReport, String> {
+    runtime_command(move || {
+        let config = AppConfig::load();
+        let mut mode = config.find_mode(&mode_id).ok_or("未找到该模式")?.clone();
+        let mut app = mode
+            .apps
+            .iter()
+            .find(|a| a.id == app_id)
+            .ok_or("未找到该程序")?
+            .clone();
+        app.enabled = true;
+        app.delay_seconds = 0;
+        mode.apps = vec![app];
+        runtime::RuntimeStore::acquire()?.launch_mode(&mode, true)
+    })
+    .await
 }

@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { nextTick, ref, watch } from "vue";
 import { useAppsStore } from "../stores/apps";
 
 const store = useAppsStore();
+withDefaults(defineProps<{ editable?: boolean }>(), { editable: true });
+const strip = ref<HTMLElement | null>(null);
+watch(() => store.activeModeId, async () => {
+  await nextTick();
+  strip.value?.querySelector('.is-active')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}, { immediate: true });
 
 // 预设颜色
 const COLORS = [
@@ -76,163 +82,71 @@ async function handleDelete(modeId: string) {
 </script>
 
 <template>
-  <!-- 模式标签栏 -->
-  <div class="flex items-center gap-2 overflow-x-auto pb-1">
-    <button
-      v-for="mode in store.modes"
-      :key="mode.id"
-      @click="store.setActiveMode(mode.id)"
-      :class="[
-        'group relative flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-150 whitespace-nowrap',
-        store.activeModeId === mode.id
-          ? 'text-white shadow-md'
-          : 'bg-white text-gray-600 hover:bg-gray-50 border border-gray-200',
-      ]"
-      :style="
-        store.activeModeId === mode.id
-          ? { backgroundColor: mode.color }
-          : {}
-      "
-    >
-      <span class="text-base">{{ mode.icon_emoji }}</span>
-      <span>{{ mode.name }}</span>
-      <span
-        v-if="mode.auto_start"
-        class="text-xs opacity-70"
-        title="开机自启"
-      >⚡</span>
-
-      <!-- 编辑/删除按钮 -->
+  <section aria-label="启动模式" :class="{ 'quick-modes': !editable }">
+    <div class="mode-label">启动模式 <span>{{ store.modes.length }} 个场景</span></div>
+    <div ref="strip" class="glass-panel mode-strip">
       <div
-        v-if="store.activeModeId === mode.id"
-        class="flex items-center gap-0.5 ml-1"
+        v-for="mode in store.modes"
+        :key="mode.id"
+        class="mode-pill"
+        :class="{ 'is-active': store.activeModeId === mode.id }"
+        :style="{ '--mode-accent': mode.color }"
       >
-        <button
-          @click.stop="openEditModal(mode.id)"
-          class="p-0.5 rounded hover:bg-white/20 transition-colors"
-          title="编辑模式"
-        >
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-          </svg>
+        <button type="button" class="mode-select" :aria-pressed="store.activeModeId === mode.id" @click="store.setActiveMode(mode.id)">
+          <span class="text-base" aria-hidden="true">{{ mode.icon_emoji }}</span>
+          <span class="mode-name" :title="mode.name">{{ mode.name }}</span>
+          <span v-if="store.runtimeStatus?.modes.some((running) => running.id === mode.id)" class="running-mode-marker">当前</span>
+          <span v-if="mode.auto_start" class="auto-indicator" title="此模式已开启开机自启"><span class="sr-only">开机自启</span></span>
         </button>
-        <button
-          @click.stop="handleDelete(mode.id)"
-          class="p-0.5 rounded hover:bg-white/20 transition-colors"
-          title="删除模式"
-        >
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+        <div v-if="editable && store.activeModeId === mode.id" class="mode-actions">
+          <button type="button" @click="openEditModal(mode.id)" :disabled="store.operationBusy" class="icon-button" title="编辑模式" aria-label="编辑模式">
+            <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+          </button>
+          <button type="button" @click="handleDelete(mode.id)" :disabled="store.operationBusy" class="icon-button icon-button--danger" title="删除模式" aria-label="删除模式">
+            <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
       </div>
-    </button>
+      <button v-if="editable" type="button" @click="openAddModal" :disabled="store.operationBusy" class="glass-button mode-new">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M12 4v16m8-8H4" /></svg>
+        新建模式
+      </button>
+    </div>
+  </section>
 
-    <!-- 添加模式按钮 -->
-    <button
-      @click="openAddModal"
-      class="flex items-center gap-1 px-3 py-2 rounded-xl text-sm text-gray-400
-             hover:text-blue-500 hover:bg-blue-50 border border-dashed border-gray-300
-             hover:border-blue-300 transition-all duration-150 whitespace-nowrap"
-    >
-      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-      </svg>
-      新建模式
-    </button>
-  </div>
-
-  <!-- 弹窗 -->
   <Teleport to="body">
-    <div
-      v-if="showModal"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-      @click.self="showModal = false"
-    >
-      <div class="bg-white rounded-2xl shadow-xl w-[400px] p-6 space-y-5">
-        <h3 class="text-lg font-semibold text-gray-800">
-          {{ editingModeId ? "编辑模式" : "新建模式" }}
-        </h3>
-
-        <!-- 名称 -->
-        <div>
-          <label class="block text-sm font-medium text-gray-600 mb-1">模式名称</label>
-          <input
-            v-model="formName"
-            type="text"
-            placeholder="如：办公模式"
-            class="w-full px-3 py-2 border border-gray-200 rounded-xl
-                   focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-transparent"
-          />
+    <div v-if="showModal" class="modal-overlay" @click.self="showModal = false" @keydown.esc="showModal = false">
+      <section class="glass-dialog mode-dialog space-y-5" role="dialog" aria-modal="true" aria-labelledby="mode-dialog-title">
+        <div class="flex items-center justify-between">
+          <h2 id="mode-dialog-title" class="dialog-title">{{ editingModeId ? "编辑模式" : "新建模式" }}</h2>
+          <button type="button" @click="showModal = false" class="icon-button" aria-label="关闭模式设置">✕</button>
         </div>
-
-        <!-- Emoji -->
         <div>
-          <label class="block text-sm font-medium text-gray-600 mb-1">图标</label>
-          <div class="flex flex-wrap gap-1.5">
-            <button
-              v-for="emoji in EMOJIS"
-              :key="emoji"
-              @click="formEmoji = emoji"
-              :class="[
-                'w-9 h-9 rounded-lg text-lg flex items-center justify-center transition-all',
-                formEmoji === emoji
-                  ? 'bg-blue-100 ring-2 ring-blue-400 scale-110'
-                  : 'hover:bg-gray-100',
-              ]"
-            >
-              {{ emoji }}
-            </button>
+          <label for="mode-name" class="field-label">模式名称</label>
+          <input id="mode-name" v-model="formName" type="text" placeholder="如：办公模式" class="glass-input w-full" @keydown.enter="handleSave" />
+        </div>
+        <fieldset>
+          <legend class="field-label">选择图标</legend>
+          <div class="flex flex-wrap gap-2">
+            <button v-for="emoji in EMOJIS" :key="emoji" type="button" @click="formEmoji = emoji" class="emoji-option" :class="{ 'is-selected': formEmoji === emoji }" :aria-pressed="formEmoji === emoji" :aria-label="`选择图标 ${emoji}`">{{ emoji }}</button>
           </div>
-        </div>
-
-        <!-- 颜色 -->
-        <div>
-          <label class="block text-sm font-medium text-gray-600 mb-1">主题色</label>
-          <div class="flex gap-2">
-            <button
-              v-for="color in COLORS"
-              :key="color"
-              @click="formColor = color"
-              :class="[
-                'w-8 h-8 rounded-full transition-all',
-                formColor === color ? 'ring-2 ring-offset-2 ring-gray-400 scale-110' : '',
-              ]"
-              :style="{ backgroundColor: color }"
-            />
+        </fieldset>
+        <fieldset>
+          <legend class="field-label">主题颜色</legend>
+          <div class="flex flex-wrap gap-3 px-1 py-1">
+            <button v-for="color in COLORS" :key="color" type="button" @click="formColor = color" class="color-option" :class="{ 'is-selected': formColor === color }" :style="{ backgroundColor: color }" :aria-pressed="formColor === color" :aria-label="`选择颜色 ${color}`" />
           </div>
+        </fieldset>
+        <div class="mode-preview" :style="{ borderColor: formColor + '35' }">
+          <span class="text-xl" aria-hidden="true">{{ formEmoji }}</span>
+          <span class="text-sm font-medium">{{ formName || "你的新模式" }}</span>
+          <span class="ml-auto text-xs text-slate-500">预览</span>
         </div>
-
-        <!-- 预览 -->
-        <div class="flex items-center gap-2 p-3 bg-gray-50 rounded-xl">
-          <span class="text-xl">{{ formEmoji }}</span>
-          <span
-            class="px-3 py-1 rounded-lg text-white text-sm font-medium"
-            :style="{ backgroundColor: formColor }"
-          >
-            {{ formName || "预览" }}
-          </span>
+        <div class="flex justify-end gap-2 pt-1">
+          <button type="button" @click="showModal = false" class="glass-button glass-button--quiet">取消</button>
+          <button type="button" @click="handleSave" :disabled="!formName.trim()" class="glass-button glass-button--primary">{{ editingModeId ? "保存" : "创建" }}</button>
         </div>
-
-        <!-- 操作按钮 -->
-        <div class="flex justify-end gap-2 pt-2">
-          <button
-            @click="showModal = false"
-            class="px-4 py-2 text-sm text-gray-600 rounded-xl hover:bg-gray-100 transition-colors"
-          >
-            取消
-          </button>
-          <button
-            @click="handleSave"
-            class="px-4 py-2 text-sm text-white bg-blue-500 rounded-xl
-                   hover:bg-blue-600 transition-colors"
-          >
-            {{ editingModeId ? "保存" : "创建" }}
-          </button>
-        </div>
-      </div>
+      </section>
     </div>
   </Teleport>
 </template>

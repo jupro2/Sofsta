@@ -4,13 +4,22 @@ use winreg::enums::*;
 use winreg::RegKey;
 
 const REG_KEY_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const APP_NAME: &str = "AutoStartManager";
+const APP_NAME: &str = "Sofsta";
+const LEGACY_APP_NAME: &str = "AutoStartManager";
+
+#[cfg(target_os = "windows")]
+fn remove_entry(key: &RegKey, name: &str) -> Result<(), String> {
+    match key.delete_value(name) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("删除启动项 {} 失败: {}", name, error)),
+    }
+}
 
 /// 注册开机自启动
 #[cfg(target_os = "windows")]
 pub fn register_autostart() -> Result<(), String> {
-    let exe_path =
-        std::env::current_exe().map_err(|e| format!("获取程序路径失败: {}", e))?;
+    let exe_path = std::env::current_exe().map_err(|e| format!("获取程序路径失败: {}", e))?;
 
     let value = format!("\"{}\" --silent", exe_path.display());
 
@@ -23,6 +32,9 @@ pub fn register_autostart() -> Result<(), String> {
         .set_value(APP_NAME, &value)
         .map_err(|e| format!("设置注册表值失败: {}", e))?;
 
+    // Only remove the legacy entry after the Sofsta entry has been written successfully.
+    remove_entry(&run_key, LEGACY_APP_NAME)?;
+
     Ok(())
 }
 
@@ -34,10 +46,8 @@ pub fn unregister_autostart() -> Result<(), String> {
         .open_subkey_with_flags(REG_KEY_PATH, KEY_WRITE)
         .map_err(|e| format!("打开注册表失败: {}", e))?;
 
-    match run_key.delete_value(APP_NAME) {
-        Ok(_) => Ok(()),
-        Err(_) => Ok(()), // 值不存在也视为成功
-    }
+    remove_entry(&run_key, APP_NAME)?;
+    remove_entry(&run_key, LEGACY_APP_NAME)
 }
 
 /// 检查是否已注册开机自启动
@@ -48,10 +58,9 @@ pub fn is_autostart_registered() -> Result<bool, String> {
         .open_subkey_with_flags(REG_KEY_PATH, KEY_READ)
         .map_err(|e| format!("打开注册表失败: {}", e))?;
 
-    match run_key.get_value::<String, _>(APP_NAME) {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false),
-    }
+    Ok([APP_NAME, LEGACY_APP_NAME]
+        .iter()
+        .any(|name| run_key.get_value::<String, _>(*name).is_ok()))
 }
 
 // 非 Windows 平台的空实现
